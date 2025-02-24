@@ -1,313 +1,211 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: 'CloudFormation template to create a VPC with public and private subnets spanning two AZs'
-
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation template to create IAM users, groups, event rule, and Lambda function."
 Parameters:
-  EnvironmentName:
-    Description: Name for this environment
+  S3UserEmail:
     Type: String
-    Default: VPCLab
-    
-  VpcCIDR:
-    Description: CIDR block for the VPC
+    Default: "s3-user@example.com"
+    Description: "Email address for S3 user"
+  EC2UserEmail:
     Type: String
-    Default: 10.0.0.0/16
-
-  PublicSubnet1CIDR:
-    Description: CIDR block for the public subnet in AZ1
-    Type: String
-    Default: 10.0.0.0/24
-
-  PublicSubnet2CIDR:
-    Description: CIDR block for the public subnet in AZ2
-    Type: String
-    Default: 10.0.1.0/24
-
-  PrivateSubnet1CIDR:
-    Description: CIDR block for the private subnet in AZ1
-    Type: String
-    Default: 10.0.2.0/24
-    
-  PrivateSubnet2CIDR:
-    Description: CIDR block for the private subnet in AZ2
-    Type: String
-    Default: 10.0.3.0/24
-    
-  EC2InstanceType:
-    Description: Instance type for the EC2 instances
-    Type: String
-    Default: t2.micro
-  
-  LatestAmiId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
-    
-  YourFullName:
-    Description: Your full name for the web server display
-    Type: String
-    Default: Your Full Name
-
+    Default: "ec2-user@example.com"
+    Description: "Email address for EC2 user"
 Resources:
-  # VPC Creation
-  VPC:
-    Type: AWS::EC2::VPC
+  # Generate a One-Time Password and store in Secrets Manager
+  OneTimePassword:
+    Type: AWS::SecretsManager::Secret
     Properties:
-      CidrBlock: !Ref VpcCIDR
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-VPC'
-
-  # Internet Gateway
-  InternetGateway:
-    Type: AWS::EC2::InternetGateway
+      Name: !Sub "${AWS::StackName}-temp-password"
+      Description: "One-Time Password for IAM users"
+      GenerateSecretString:
+        PasswordLength: 12
+        ExcludePunctuation: true
+  # Create IAM Group for S3 read access
+  S3UserGroup:
+    Type: AWS::IAM::Group
     Properties:
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-IGW'
-
-  InternetGatewayAttachment:
-    Type: AWS::EC2::VPCGatewayAttachment
+      GroupName: S3ReadOnlyGroup
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+  # Create IAM Group for EC2 read access
+  EC2UserGroup:
+    Type: AWS::IAM::Group
     Properties:
-      InternetGatewayId: !Ref InternetGateway
-      VpcId: !Ref VPC
-
-  # Public Subnets
-  PublicSubnet1:
-    Type: AWS::EC2::Subnet
+      GroupName: EC2ReadOnlyGroup
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+  # Create IAM User for S3 and assign to S3 Group
+  S3User:
+    Type: AWS::IAM::User
     Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [0, !GetAZs '']
-      CidrBlock: !Ref PublicSubnet1CIDR
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-PublicSubnet1'
-
-  PublicSubnet2:
-    Type: AWS::EC2::Subnet
+      UserName: s3-user
+      Groups:
+        - !Ref S3UserGroup
+      LoginProfile:
+        Password: !Sub "{{resolve:secretsmanager:${OneTimePassword}}}"
+        PasswordResetRequired: true
+  # Store S3 User Email in SSM Parameter Store
+  S3UserEmailParameter:
+    Type: AWS::SSM::Parameter
     Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [1, !GetAZs '']
-      CidrBlock: !Ref PublicSubnet2CIDR
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-PublicSubnet2'
-
-  # Private Subnets
-  PrivateSubnet1:
-    Type: AWS::EC2::Subnet
+      Name: !Sub "/${AWS::StackName}/s3-user/email"
+      Type: String
+      Value: !Ref S3UserEmail
+  # Create IAM User for EC2 and assign to EC2 Group
+  EC2User:
+    Type: AWS::IAM::User
     Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [0, !GetAZs '']
-      CidrBlock: !Ref PrivateSubnet1CIDR
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-PrivateSubnet1'
-
-  PrivateSubnet2:
-    Type: AWS::EC2::Subnet
+      UserName: ec2-user
+      Groups:
+        - !Ref EC2UserGroup
+      LoginProfile:
+        Password: !Sub "{{resolve:secretsmanager:${OneTimePassword}}}"
+        PasswordResetRequired: true
+  # Store EC2 User Email in SSM Parameter Store
+  EC2UserEmailParameter:
+    Type: AWS::SSM::Parameter
     Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [1, !GetAZs '']
-      CidrBlock: !Ref PrivateSubnet2CIDR
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-PrivateSubnet2'
-
-  # NAT Gateway creation
-  NatGatewayEIP:
-    Type: AWS::EC2::EIP
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      Domain: vpc
-
-  NatGateway:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt NatGatewayEIP.AllocationId
-      SubnetId: !Ref PublicSubnet1
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-NATGateway'
-
-  # Public Route Table
-  PublicRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-PublicRouteTable'
-
-  PublicRoute:
-    Type: AWS::EC2::Route
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-
-  PublicSubnet1RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnet1
-
-  PublicSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnet2
-
-  # Private Route Table
-  PrivateRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-PrivateRouteTable'
-
-  PrivateRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway
-
-  PrivateSubnet1RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable
-      SubnetId: !Ref PrivateSubnet1
-
-  PrivateSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable
-      SubnetId: !Ref PrivateSubnet2
-
-  # Security Groups
-  WebServerSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security group for web server
-      VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: 0.0.0.0/0
-        - IpProtocol: icmp
-          FromPort: -1
-          ToPort: -1
-          CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-WebServerSG'
-
-  PrivateInstanceSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security group for private instance
-      VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          SourceSecurityGroupId: !Ref WebServerSecurityGroup
-        - IpProtocol: icmp
-          FromPort: -1
-          ToPort: -1
-          SourceSecurityGroupId: !Ref WebServerSecurityGroup
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-PrivateInstanceSG'
-
-  # IAM Role for SSM
-  SSMInstanceRole:
+      Name: !Sub "/${AWS::StackName}/ec2-user/email"
+      Type: String
+      Value: !Ref EC2UserEmail
+  # Lambda Execution Role
+  LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub "${AWS::StackName}-lambda-role"
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
-              Service: ec2.amazonaws.com
-            Action: 'sts:AssumeRole'
-      ManagedPolicyArns:
-        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
-
-  SSMInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaIAMUserLoggerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref OneTimePassword
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+  # Lambda Function
+  UserCreationLoggerFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      Roles:
-        - !Ref SSMInstanceRole
-
-  # EC2 Instances
-  WebServerInstance:
-    Type: AWS::EC2::Instance
+      FunctionName: !Sub "${AWS::StackName}-user-logger"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          AWS_STACK_NAME: !Ref AWS::StackName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          def lambda_handler(event, context):
+              try:
+                  # Debug print to see the incoming event
+                  print("Received event:", json.dumps(event))
+                  # Initialize AWS clients
+                  ssm = boto3.client('ssm')
+                  secrets = boto3.client('secretsmanager')
+                  # Extract username from the event with better error handling
+                  if 'detail' in event:
+                      # This is an EventBridge event
+                      detail = event['detail']
+                      if 'requestParameters' in detail:
+                          request_parameters = detail['requestParameters']
+                          if isinstance(request_parameters, str):
+                              request_parameters = json.loads(request_parameters)
+                          user_name = request_parameters.get('userName')
+                      else:
+                          raise ValueError("No requestParameters in event detail")
+                  else:
+                      # This might be a test event
+                      print("No detail field found in event. This might be a test event.")
+                      user_name = "test-user"  # Use a default for testing
+                  if not user_name:
+                      raise ValueError("Could not extract username from event")
+                  print(f"Processing for user: {user_name}")
+                  # Get user email from Parameter Store
+                  stack_name = os.environ.get('AWS_STACK_NAME', '')
+                  email_parameter = f'/{stack_name}/{user_name}/email'
+                  print(f"Looking for parameter: {email_parameter}")
+                  try:
+                      user_email = ssm.get_parameter(
+                          Name=email_parameter
+                      )['Parameter']['Value']
+                  except Exception as e:
+                      print(f"Error getting email parameter: {str(e)}")
+                      user_email = "example@example.com"  # Fallback for testing
+                  # Get temporary password from Secrets Manager
+                  secret_name = f'{stack_name}-temp-password'
+                  print(f"Looking for secret: {secret_name}")
+                  try:
+                      temp_password = secrets.get_secret_value(
+                          SecretId=secret_name
+                      )['SecretString']
+                  except Exception as e:
+                      print(f"Error getting secret: {str(e)}")
+                      temp_password = "test-password"  # Fallback for testing
+                  # Log the information
+                  message = f"New user created - Username: {user_name}, Email: {user_email}, Temporary Password: {temp_password}"
+                  print(message)
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Successfully processed user creation event')
+                  }
+              except Exception as e:
+                  print(f"Error processing event: {str(e)}")
+                  print(f"Event structure: {json.dumps(event)}")
+                  raise e
+  # EventBridge Rule
+  UserCreationEventRule:
+    Type: AWS::Events::Rule
     Properties:
-      ImageId: !Ref LatestAmiId
-      InstanceType: !Ref EC2InstanceType
-      SecurityGroupIds:
-        - !Ref WebServerSecurityGroup
-      SubnetId: !Ref PublicSubnet1
-      IamInstanceProfile: !Ref SSMInstanceProfile
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          yum update -y
-          yum install -y httpd
-          systemctl start httpd
-          systemctl enable httpd
-          echo "<html><head><title>Welcome to my AWS Lab</title></head><body><h1>Hello, my name is ${YourFullName}</h1><p>This Apache web server is running on an EC2 instance in a public subnet.</p></body></html>" > /var/www/html/index.html
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-WebServer'
-
-  PrivateInstance:
-    Type: AWS::EC2::Instance
+      Name: !Sub "${AWS::StackName}-user-creation-rule"
+      Description: "Trigger Lambda on new IAM user creation"
+      EventPattern:
+        source:
+          - "aws.iam"
+        detail-type:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventSource:
+            - "iam.amazonaws.com"
+          eventName:
+            - "CreateUser"
+      Targets:
+        - Arn: !GetAtt UserCreationLoggerFunction.Arn
+          Id: "IAMUserLoggerLambda"
+  # Lambda Permission
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
     Properties:
-      ImageId: !Ref LatestAmiId
-      InstanceType: !Ref EC2InstanceType
-      SecurityGroupIds:
-        - !Ref PrivateInstanceSecurityGroup
-      SubnetId: !Ref PrivateSubnet1
-      IamInstanceProfile: !Ref SSMInstanceProfile
-      Tags:
-        - Key: Name
-          Value: !Sub '${EnvironmentName}-PrivateInstance'
-
+      FunctionName: !Ref UserCreationLoggerFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt UserCreationEventRule.Arn
 Outputs:
-  VPC:
-    Description: A reference to the created VPC
-    Value: !Ref VPC
-
-  PublicSubnets:
-    Description: A list of the public subnets
-    Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
-
-  PrivateSubnets:
-    Description: A list of the private subnets
-    Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
-
-  WebServerPublicDNS:
-    Description: Public DNS of the web server
-    Value: !GetAtt WebServerInstance.PublicDnsName
-
-  WebServerURL:
-    Description: URL to the web server
-    Value: !Sub 'http://${WebServerInstance.PublicDnsName}'
-
-  PrivateInstancePrivateIP:
-    Description: Private IP of the instance in the private subnet
-    Value: !GetAtt PrivateInstance.PrivateIp
+  OneTimePasswordSecret:
+    Value: !Ref OneTimePassword
+    Description: "Secret name storing the one-time password"
+  LambdaFunction:
+    Value: !GetAtt UserCreationLoggerFunction.Arn
+    Description: "Lambda function ARN"
+  EventRule:
+    Value: !Ref UserCreationEventRule
+    Description: "EventBridge Rule detecting IAM user creation"
